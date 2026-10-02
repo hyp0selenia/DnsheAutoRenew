@@ -2,6 +2,10 @@ name = "renew"
 main = "src/worker.js"
 compatibility_date = "2026-01-01"
 
-# 每 6 个月 1 号 0 点执行（UTC 时间）
+# 定时自动续期：每 6 个月 1 号 00:00 UTC（北京时间当日 08:00）
 [triggers]
-crons = [ "0 0 1 */6 *" ]
+crons = ["0 0 1 */6 *"]
+
+# 密钥不要写进本文件（会被提交进仓库）：
+#   本地调试 -> wrangler secret put API_KEY / API_SECRET
+#   线上     -> Cloudflare Dashboard → 该 Worker → Settings → Variables and Secrets

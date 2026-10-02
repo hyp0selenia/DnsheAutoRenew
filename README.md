@@ -11,7 +11,9 @@
 2. [免费域名注册指导](#2-免费域名注册指导-dnshe平台)
 3. [部署到Cloudflare Workers完整教程](#3-部署到cloudflare-workers完整教程)
 4. [使用说明](#4-使用说明)
-5. [常见问题FAQ](#5-常见问题faq)
+5. [故障排查](#5-故障排查)
+6. [常见问题FAQ](#6-常见问题faq)
+7. [项目文件说明](#7-项目文件说明)
 
 ## 1. 项目介绍
 本项目专为 DNSHE 平台免费二级域名打造，解决免费域名易过期、手动续期繁琐的问题，依托 Cloudflare Workers 实现无服务器、零成本、7×24小时稳定运行，核心优势如下：
@@ -69,20 +71,29 @@
 4. 点击**添加**，完成定时任务配置，工具将每半年自动续期一次域名
 
 ### 3.5 本地开发配置（可选）
-如需本地修改调试，创建`wrangler.toml`文件，配置如下：
+仓库内已包含 `wrangler.toml`，内容如下：
 ```toml
-name = "dnshe"
-main = "worker.js"
-compatibility_date = "2026-04-01"
-
-# 本地环境变量（仅本地调试用，切勿上传仓库）
-[vars]
-API_KEY = "你的DNSHE API Key"
-API_SECRET = "你的DNSHE API Secret"
+name = "renew"
+main = "src/worker.js"
+compatibility_date = "2026-01-01"
 
 # 定时任务配置
 [triggers]
-crons = [ "0 0 1 */6 *" ]
+crons = ["0 0 1 */6 *"]
+```
+
+本地调试请用 `wrangler dev`，密钥通过 secret 注入，**不要**写进 `wrangler.toml`（该文件会被提交进仓库）：
+
+```bash
+npx wrangler secret put API_KEY
+npx wrangler secret put API_SECRET
+npx wrangler dev
+```
+
+部署到线上：
+
+```bash
+npx wrangler deploy
 ```
 
 ## 4. 使用说明
@@ -92,18 +103,60 @@ crons = [ "0 0 1 */6 *" ]
 3. 点击**开始续期**按钮，工具自动获取所有活跃域名并执行续期
 4. 页面实时显示续期日志，可查看每个域名的续期成功/失败状态
 
+> 日志中每个域名都会显示**状态**、**到期时间**和**剩余天数**，末尾给出「续期成功 / 跳过 / 失败」的汇总。剩余天数 > 180 的域名属于正常跳过，不是失败。
+
 ### 4.2 自动续期说明
 配置Cron触发器后，工具会**每6个月1号自动执行续期**，无需手动操作，执行日志可在Cloudflare Workers的**日志**页面查看。
 
-## 5. 常见问题FAQ
+### 4.3 续期规则（以官方为准）
+- 免费二级域名有效期为 **1 年**
+- **到期前 180 天**开放免费续期窗口，窗口内续期免费且次数不限
+- 续期成功后到期时间顺延 1 年
+- 已设置为**永不过期**（`never_expires`）的域名会被自动跳过
+
+### 4.4 诊断接口
+部署后可直接访问 `/debug`（JSON），或点击页面上的**诊断**按钮，查看接口返回的真实结构：
+
+- 每个域名的 `status`、`expires_at`、`updated_at`、`never_expires`
+- 状态分布直方图（例如 `expired: 8`）
+- 自动结论（指出认证失败、字段缺失、状态异常等）
+
+`/debug` 为只读接口，只调用 `action=list`，不会执行任何续期操作，输出中也**不包含** `API_KEY` / `API_SECRET`。
+
+## 5. 故障排查
+### 5.1 日志显示「无活跃子域名」，但账号下明明有域名
+这是本项目历史版本的一个已知缺陷：旧代码用 `filter(item => item.status === "active")` 过滤域名，**只有状态恰好等于 `active` 的域名才会被处理**。DNSHE 的 `status` 取值还包括 `expired`、`suspended` 等，一旦账号下没有 `active` 的域名，列表就会被清空，于是无论接口是否正常、密钥是否正确，都会统一输出「无活跃子域名」。
+
+当前版本已修正：
+
+- 不再按 `status === "active"` 一刀切；非 `active` 的域名只给出警告，仍会按到期时间尝试续期
+- 日志始终打印**状态分布**，一眼就能看出真实取值
+- 认证失败、字段结构变化等真实原因会原样输出，不再被兜底文案掩盖
+
+### 5.2 剩余天数判断不准 / 明明快到期却提示无需续期
+旧代码不读接口返回的权威字段 `expires_at`，而是拿 `updated_at` 按 365 天反推，并且额外减了 8 小时时区。Cloudflare Workers 运行时本身就是 UTC，`new Date("2026-09-22 10:00:00")` 会被当作 UTC 解析，再减 8 小时就产生了偏差，在 180 天边界上会误判。
+
+当前版本改为：优先使用接口的 `expires_at`（按北京时间 `+08:00` 正确解析），其次 `remaining_days`，都没有时才回退到 `created_at` / `updated_at` 估算；到期时间无法解析时不再静默跳过，而是发起续期让接口给出真实原因。
+
+### 5.3 其他常见返回
+| 日志/返回 | 含义与处理 |
+| --- | --- |
+| `422 renewal not yet available` | 尚未进入到期前 180 天的续期窗口，属正常，过些天再试 |
+| `403 renewal window expired` | 续期宽限期已过 |
+| `403 redemption period requires administrator` | 域名处于赎回期，需联系 DNSHE 管理员 |
+| `402 insufficient balance for redemption renewal` | 赎回期自动扣费但余额不足 |
+| `404 subdomain not found` | 域名不存在或不属于当前 API Key |
+| `listDomains HTTP错误: 401/403` | 密钥错误、被 IP 白名单拦截或额度受限 |
+
+## 6. 常见问题FAQ
 ### Q1：部署后点击续期提示API密钥错误？
 A：检查Cloudflare环境变量名称是否为`API_KEY`和`API_SECRET`（区分大小写），确认密钥粘贴无误，重新部署后重试。
 
 ### Q2：定时任务没有自动执行？
 A：检查Cron规则是否正确输入`0 0 1 */6 *`，确认触发器已启用，可在Cloudflare Workers日志页面查看执行记录。
 
-### Q3：续期失败提示“无活跃子域名”？
-A：确认DNSHE账号下有已注册且状态为「活跃」的免费二级域名，检查域名是否已过期或被封禁。
+### Q3：续期失败提示「无活跃子域名」？
+A：参见 [5.1](#51-日志显示无活跃子域名但账号下明明有域名)。请先访问 `/debug` 查看**状态分布**与每个域名的 `status` 字段；当前版本已不再因状态不为 `active` 而丢弃域名。
 
 ### Q4：Cloudflare Workers免费额度够用吗？
 A：完全够用，Cloudflare Workers免费版每日请求次数10万次，本工具单次续期请求极少，无额度压力。
@@ -112,7 +165,53 @@ A：完全够用，Cloudflare Workers免费版每日请求次数10万次，本�
 A：可以，修改Cron触发器的定时规则即可，例如改为每月1号执行：`0 0 1 * *`，根据自身需求调整。
 
 ### Q6：本工具安全吗？会泄露域名账号吗？
-A：绝对安全，API密钥存储在Cloudflare官方环境变量中，代码中无任何密钥硬编码，不会上传至任何第三方服务器。
+A：绝对安全，API密钥存储在Cloudflare官方环境变量中，代码中无任何密钥硬编码，不会上传至任何第三方服务器。此外 `/debug` 诊断接口的输出中也不包含 `API_KEY` / `API_SECRET`。
+
+## 7. 项目文件说明
+```
+DnsheAutoRenew-main/
+├── src/
+│   ├── worker.js              # 部署用主代码（单文件，可直接整段粘贴进 Cloudflare 网页编辑器）
+│   └── worker.upstream.js     # 上游原始版本，仅作对比留档，不参与部署
+├── diagnostics/
+│   └── worker-debug-only.js   # 只读诊断 Worker：仅调 action=list，不做任何续期写操作
+├── tools/
+│   └── delete-subdomain.mjs   # 删除子域名脚本（默认预演，需 --yes 才真正删除）
+├── tests/
+│   ├── test-worker-fixed.mjs       # 主代码逻辑测试（模拟接口响应，21 项断言）
+│   ├── test-worker-debug-only.mjs  # 诊断版安全性与输出测试
+│   ├── test-delete-subdomain.mjs   # 删除工具测试（进程内 mock，28 项断言）
+│   └── probe-api.mjs               # 直连 DNSHE 接口的探测脚本（需本机可访问 api005.dnshe.com）
+├── wrangler.toml              # wrangler CLI 部署配置
+├── README.md
+└── LICENSE
+```
+
+### 7.1 运行测试
+```bash
+node tests/test-worker-fixed.mjs
+node tests/test-worker-debug-only.mjs
+node tests/test-delete-subdomain.mjs
+```
+三套测试共 49 项断言，全部使用模拟的接口响应，**不会访问真实接口、也不会读取真实密钥**，可随时安全运行：
+
+- `test-worker-fixed.mjs`：8 个域名状态全非 `active`、未进入续期窗口、接口 `success=false`、响应缺少 `subdomains` 数组、`/debug` 诊断输出、北京时间时区解析、永不过期域名跳过
+- `test-worker-debug-only.mjs`：诊断版只调用只读 `list`、不做写操作、输出不含密钥
+- `test-delete-subdomain.mjs`：预演模式不删除、`--yes` 才删除、域名不存在时中止、复核不一致时中止、同名多条时中止、接口失败不谎报成功、缺少参数拒绝执行
+
+### 7.2 最小化部署
+`src/worker.js` 已把诊断接口与页面 UI 一起打包，无需额外依赖，可直接整段替换 Cloudflare 网页编辑器中的代码。若只想要诊断能力，可临时部署 `diagnostics/worker-debug-only.js` 并访问 `/debug`。
+
+### 7.3 删除子域名（不可逆）
+`tools/delete-subdomain.mjs` 用于删除子域名，**默认只预演不删除**，并会先核对列表、再用 `get` 接口复核 `id` 与域名一致性：
+
+```bash
+cd DnsheAutoRenew-main
+node tools/delete-subdomain.mjs demo.de5.net          # 预演：只查询、只打印将要删除的内容
+node tools/delete-subdomain.mjs demo.de5.net --yes    # 确认无误后才真正删除
+```
+
+凭据按以下顺序读取：环境变量 `API_KEY` / `API_SECRET`，或上一级的 `dnshekey.txt`。删除会同时清理该域名的全部 DNS 记录，且无法撤销。
 
 ## 开源协议
 本项目基于 **MIT License** 开源协议，完全开源免费，可自由修改、分发、使用。
