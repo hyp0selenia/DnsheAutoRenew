@@ -175,8 +175,6 @@ DnsheAutoRenew-main/
 │   └── worker.upstream.js     # 上游原始版本，仅作对比留档，不参与部署
 ├── diagnostics/
 │   └── worker-debug-only.js   # 只读诊断 Worker：仅调 action=list，不做任何续期写操作
-├── tools/
-│   └── delete-subdomain.mjs   # 删除子域名脚本（默认预演，需 --yes 才真正删除）
 ├── tests/
 │   ├── test-worker-fixed.mjs       # 主代码逻辑测试（模拟接口响应，21 项断言）
 │   ├── test-worker-debug-only.mjs  # 诊断版安全性与输出测试
@@ -196,23 +194,8 @@ node tests/test-delete-subdomain.mjs
 三套测试共 49 项断言，全部使用模拟的接口响应，**不会访问真实接口、也不会读取真实密钥**，可随时安全运行：
 
 - `test-worker-fixed.mjs`：8 个域名状态全非 `active`、未进入续期窗口、接口 `success=false`、响应缺少 `subdomains` 数组、`/debug` 诊断输出、北京时间时区解析、永不过期域名跳过
-- `test-worker-debug-only.mjs`：诊断版只调用只读 `list`、不做写操作、输出不含密钥
-- `test-delete-subdomain.mjs`：预演模式不删除、`--yes` 才删除、域名不存在时中止、复核不一致时中止、同名多条时中止、接口失败不谎报成功、缺少参数拒绝执行
-
 ### 7.2 最小化部署
 `src/worker.js` 已把诊断接口与页面 UI 一起打包，无需额外依赖，可直接整段替换 Cloudflare 网页编辑器中的代码。若只想要诊断能力，可临时部署 `diagnostics/worker-debug-only.js` 并访问 `/debug`。
-
-### 7.3 删除子域名（不可逆）
-`tools/delete-subdomain.mjs` 用于删除子域名，**默认只预演不删除**，并会先核对列表、再用 `get` 接口复核 `id` 与域名一致性：
-
-```bash
-cd DnsheAutoRenew-main
-node tools/delete-subdomain.mjs demo.de5.net          # 预演：只查询、只打印将要删除的内容
-node tools/delete-subdomain.mjs demo.de5.net --yes    # 确认无误后才真正删除
-```
-
-凭据按以下顺序读取：环境变量 `API_KEY` / `API_SECRET`，或上一级的 `dnshekey.txt`。删除会同时清理该域名的全部 DNS 记录，且无法撤销。
-
 ## 开源协议
 本项目基于 **MIT License** 开源协议，完全开源免费，可自由修改、分发、使用。
 
